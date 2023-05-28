@@ -1,15 +1,16 @@
-use std::collections::HashMap;
+use std::cell::{RefCell, Ref};
 use std::error::Error;
-use std::future::Future;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::io::{Read, Write, BufRead};
+use std::net::TcpStream;
+use std::net::{TcpListener};
+use std::thread;
+use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-
-use tokio::sync::{Mutex};
+// use tokio::io::{AsyncReadExt, AsyncWriteExt};
+// use tokio::sync::{Mutex};
 
 //------------------------------------------------------------------------------
 pub type TcpStreamRef = Arc<Mutex<TcpStream>>;
@@ -30,7 +31,7 @@ pub struct TcpServer {
 
 impl TcpServer {
     pub async fn new(addr: &str) -> Result<Self, Box<dyn Error>> {
-        let listener = TcpListener::bind(addr).await?;
+        let listener = TcpListener::bind(addr)?;
         println!("Listening on: {}", addr);
 
         Ok(TcpServer {
@@ -40,45 +41,55 @@ impl TcpServer {
     
     pub async fn run<T>(&self, prog: Arc<Mutex<T>>) -> Result<(), Box<dyn Error>> 
     where
-        T: TcpLifecyle + Send + Sync + 'static
+        T: TcpLifecyle + Send + 'static
     {
         #[allow(clippy::never_loop)]
         loop {
-            let (mut socket, addr) = self.listener.accept().await?;
-            let socket_ref = Arc::new(Mutex::new(socket));
+            let (socket, addr) = self.listener.accept()?;
+            let socket_ref: Arc<Mutex<TcpStream>> = Arc::new(Mutex::new(socket)); 
             let arc_ref = Arc::clone(&prog);
 
-            tokio::spawn(async move {
+            thread::spawn(move || {
                 {
-                    let mut prog_ref = arc_ref.lock().await;
-                    (*prog_ref).on_connect(socket_ref.clone(), addr.clone());
+                    let locked = socket_ref.lock().unwrap();
+                    locked.set_read_timeout(Some(Duration::from_millis(3000))).unwrap();
+                    locked.set_write_timeout(Some(Duration::from_millis(3000))).unwrap();
                 }
                 
+                {
+                    let mut prog_ref = arc_ref.lock().unwrap();
+                    (prog_ref).on_connect(socket_ref.clone(), addr.clone());
+                }
+
                 let mut buf = [0; 1024];
 
                 loop {
-                    let bytes = (socket_ref.lock().await)
-                        .read(&mut buf)
-                        .await;
+                    let bytes;
 
+                    {
+                        bytes = socket_ref.lock().unwrap().read(&mut buf);
+                    }
+
+                    
                     if bytes.is_err() {
                         let e = bytes.err().unwrap();
                         if e.kind() == std::io::ErrorKind::ConnectionReset {
-                            let mut prog_ref = arc_ref.lock().await;
-                            (*prog_ref).on_disconect(socket_ref.clone(), addr.clone());
+                            let mut prog_ref = arc_ref.lock().unwrap();
+                            (prog_ref).on_disconect(socket_ref.clone(), addr.clone());
                         } 
+                        // else if e.kind() == std::io::ErrorKind::TimedOut {
+                        //     // println!("Timed Out: {}", addr);
+                        //     continue;
+                        // }
                         panic!("failed to read from socket; err = {:?}", e);
                     }
-
+                    
                     let n = bytes.unwrap();
 
                     {
-                        let mut prog_ref = arc_ref.lock().await;
-                        (*prog_ref).on_receive(&buf, &n, socket_ref.clone(), addr.clone());
+                        let mut prog_ref = arc_ref.lock().unwrap();
+                        (prog_ref).on_receive(&buf, &n, socket_ref.clone(), addr.clone());
                     }
-                
-                    // socket.write_all(&buf[..n]).await.unwrap();
-                    // socket.write_all(&buf[..bytes.unwrap()]).await.unwrap();
                 }
             });
         }

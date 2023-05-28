@@ -1,15 +1,28 @@
 mod modules;
 
 use dotenv::{from_filename};
-use serde_json::Value;
-use tokio::{sync::Mutex, net::TcpStream, io::AsyncWriteExt, io::AsyncReadExt};
-use std::{env, error::Error, collections::HashMap, net::SocketAddr, sync::Arc, future::Future};
+use serde_json::{Value, json};
+// use tokio::{sync::Mutex};
+use std::{
+    env, 
+    error::Error, 
+    collections::HashMap, 
+    net::{SocketAddr, TcpStream, ToSocketAddrs}, 
+    sync::{Arc, Mutex}, 
+    io::{Write, Read}
+};
 
 use modules::tcp_server::{TcpServer, TcpLifecyle, TcpStreamRef};
 
 struct Peer {
     name: String,
     socket: TcpStreamRef
+}
+
+impl Peer {
+    fn new(name: String, socket: TcpStreamRef) -> Self {
+        Peer { name, socket }
+    }
 }
 
 #[derive(Debug)]
@@ -29,10 +42,22 @@ impl Program {
         }
     }
 
-    async fn write_all_excluding(&self, addr: SocketAddr, message: &str) {
+    fn write_all_exclusevily(&self, addr: &SocketAddr, message: &str) {
         for (key, val) in self.user_map.iter() {
-            if key != &addr {
-                val.socket.lock().await.write(message.as_bytes()).await.unwrap();
+            if key.to_string() != addr.to_string() {
+                let mut locked = match val.socket.lock() {
+                    Ok(locked) => locked,
+                    Err(poisoned) => {
+                        poisoned.into_inner()
+                    }
+                };
+                
+                locked.write(
+                    send_message_json(
+                        &self.user_map.get(addr).unwrap().name, 
+                        message.to_string()
+                    ).as_bytes()
+                ).unwrap();
             }
         }
     }
@@ -44,19 +69,23 @@ impl TcpLifecyle for Program {
     }
 
     fn on_receive(&mut self, buf: &[u8; 1024], bytes: &usize, socket: TcpStreamRef, addr: SocketAddr) {
-        let val = serde_json::from_slice::<serde_json::Value>(&buf[..*bytes]).unwrap();
+        let slice = &buf[..*bytes];
+        
+        let val = serde_json::from_slice::<serde_json::Value>(slice).unwrap_or_else(|e| {
+            panic!("Error {} in: {}", String::from_utf8_lossy(slice), e);
+        });
         let obj = parse_message(val);
 
         match obj {
             ChatEvent::Register(user) => {
                 println!("{} entrou!!!", user);
-                self.user_map.insert(addr, Peer {name: user, socket});
+                self.user_map.insert(addr, Peer::new(user, socket));
             },
             ChatEvent::Message(message) => {
                 let user = self.user_map.get(&addr).unwrap();
                 println!("{}: {}", user.name, message);
                 
-                // self.write_all_excluding(addr, message.as_str()).await;
+                self.write_all_exclusevily(&addr, message.as_str());
             }
         }
     }
@@ -97,4 +126,16 @@ fn parse_message(value: Value) -> ChatEvent {
         },
         _ => !panic!("Unknown event {}", event)
     }
+}
+
+fn send_message_json(name: &String, message: String) -> String {
+    let json = json!({
+        "event": "message",
+        "content": {
+            "name": name,
+            "message": message
+        }
+    });
+
+    json.to_string()
 }
