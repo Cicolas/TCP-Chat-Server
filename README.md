@@ -16,7 +16,7 @@ Qualquer conexão TCP que for estabelessida já estará pronta para receber e ma
 
 há duas "mensagens" pricipais que podem serem enviadas ao servidor:
 
-```json
+```js
 // todo cliente deve se registrar para que seja possivel indentificar na hora de enviar mnsagens
 {
     event: "register",
